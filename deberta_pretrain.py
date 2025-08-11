@@ -16,7 +16,7 @@ import coolname
 import hydra
 import pydantic
 from omegaconf import DictConfig
-from adam_atan2 import AdamATan2
+from adam_atan2_pytorch import AdamATan2
 
 from ai2arc_dataset import AI2ArcDatasetConfig, create_ai2arc_dataloader
 from utils.functions import load_model_class, get_model_source_path
@@ -44,11 +44,11 @@ class DebertaPretrainConfig(pydantic.BaseModel):
     # Training hyperparams
     global_batch_size: int
     epochs: int
-    
+
     lr: float
     lr_min_ratio: float
     lr_warmup_steps: int
-    
+
     weight_decay: float
     beta1: float
     beta2: float
@@ -72,7 +72,7 @@ class DebertaTrainState:
     optimizer_lr: float
 
 
-def cosine_schedule_with_warmup(optimizer: torch.optim.Optimizer, step: int, warmup_steps: int, 
+def cosine_schedule_with_warmup(optimizer: torch.optim.Optimizer, step: int, warmup_steps: int,
                                total_steps: int, lr_min_ratio: float, base_lr: float):
     """Cosine learning rate schedule with warmup"""
     if step < warmup_steps:
@@ -82,10 +82,10 @@ def cosine_schedule_with_warmup(optimizer: torch.optim.Optimizer, step: int, war
         # Cosine annealing
         progress = (step - warmup_steps) / (total_steps - warmup_steps)
         lr = base_lr * lr_min_ratio + 0.5 * base_lr * (1 - lr_min_ratio) * (1 + math.cos(math.pi * progress))
-    
+
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
-    
+
     return lr
 
 
@@ -93,26 +93,26 @@ def cosine_schedule_with_warmup(optimizer: torch.optim.Optimizer, step: int, war
 def main(hydra_cfg: DictConfig) -> None:
     # Convert to pydantic config
     config = DebertaPretrainConfig(**hydra_cfg)
-    
+
     # Set random seed
     torch.manual_seed(config.seed)
-    
+
     # Setup wandb
     if config.run_name is None:
         config.run_name = coolname.generate_slug(2)
-        
+
     if config.project_name is None:
         config.project_name = "deberta-hrm-experiments"
-        
+
     wandb.init(
         project=config.project_name,
         name=config.run_name,
         config=config.model_dump()
     )
-    
+
     print(f"🚀 Starting training: {config.run_name}")
     print(f"📊 Config: {config}")
-    
+
     # Create dataset
     dataset_config = AI2ArcDatasetConfig(
         model_name=config.model_name,
@@ -121,30 +121,30 @@ def main(hydra_cfg: DictConfig) -> None:
         max_length=config.max_length,
         batch_size=config.global_batch_size,
     )
-    
+
     train_loader = create_ai2arc_dataloader(dataset_config, "train")
     eval_loader = create_ai2arc_dataloader(dataset_config, "validation")
-    
+
     print(f"📚 Dataset loaded: {len(train_loader)} train batches, {len(eval_loader)} eval batches")
-    
+
     # Load model
     model_class = load_model_class(config.arch.name)
     model_config_dict = {k: v for k, v in config.arch.model_dump().items() if k not in ['name', 'loss']}
     model = model_class(model_class.Config(**model_config_dict))
-    
+
     # Load loss
     loss_class = load_model_class(config.arch.loss.name)
     loss_config_dict = {k: v for k, v in config.arch.loss.model_dump().items() if k != 'name'}
     loss_head = loss_class(model, **loss_config_dict)
-    
+
     print(f"🤖 Model loaded: {config.arch.name}")
     print(f"📉 Loss loaded: {config.arch.loss.name}")
-    
+
     # Count parameters
     total_params = sum(p.numel() for p in loss_head.parameters())
     trainable_params = sum(p.numel() for p in loss_head.parameters() if p.requires_grad)
     print(f"📊 Parameters: {trainable_params:,} trainable / {total_params:,} total")
-    
+
     # Setup optimizer
     optimizer = AdamATan2(
         loss_head.parameters(),
@@ -152,65 +152,65 @@ def main(hydra_cfg: DictConfig) -> None:
         betas=(config.beta1, config.beta2),
         weight_decay=config.weight_decay
     )
-    
+
     # Training state
     train_state = DebertaTrainState(
         model=loss_head,
         optimizer=optimizer,
         optimizer_lr=config.lr
     )
-    
+
     # Training loop
     step = 0
     total_steps = config.epochs * len(train_loader)
-    
+
     print(f"🏁 Training for {config.epochs} epochs ({total_steps} steps)")
-    
+
     for epoch in range(config.epochs):
         # Training
         train_state.model.train()
         train_metrics = {}
-        
+
         pbar = tqdm.tqdm(train_loader, desc=f"Epoch {epoch+1}/{config.epochs}")
         for batch in pbar:
             # Move to device
             batch = {k: v.cuda() if torch.cuda.is_available() else v for k, v in batch.items()}
-            
+
             # Forward pass
             carry, loss, metrics, outputs, halted = train_state.model(batch)
-            
+
             # Backward pass
             train_state.optimizer.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(train_state.model.parameters(), 1.0)
             train_state.optimizer.step()
-            
+
             # Update learning rate
             current_lr = cosine_schedule_with_warmup(
                 train_state.optimizer, step, config.lr_warmup_steps,
                 total_steps, config.lr_min_ratio, config.lr
             )
             train_state.optimizer_lr = current_lr
-            
+
             # Track metrics
             for k, v in metrics.items():
                 if k not in train_metrics:
                     train_metrics[k] = []
                 train_metrics[k].append(v.item() if torch.is_tensor(v) else v)
-            
+
             # Update progress bar
             pbar.set_postfix({
                 'loss': f"{loss.item():.4f}",
                 'lr': f"{current_lr:.6f}",
                 'acc': f"{metrics.get('accuracy', 0):.3f}" if 'accuracy' in metrics else "N/A"
             })
-            
+
             step += 1
-            
+
             # Evaluation
             if config.eval_interval and step % config.eval_interval == 0:
                 eval_metrics = evaluate(train_state.model, eval_loader)
-                
+
                 # Log to wandb
                 wandb.log({
                     "step": step,
@@ -219,16 +219,16 @@ def main(hydra_cfg: DictConfig) -> None:
                     **{f"train/{k}": sum(v)/len(v) for k, v in train_metrics.items()},
                     **{f"eval/{k}": v for k, v in eval_metrics.items()}
                 })
-                
+
                 print(f"📊 Step {step}: Train Loss={sum(train_metrics['loss'])/len(train_metrics['loss']):.4f}, "
                       f"Eval Acc={eval_metrics.get('accuracy', 0):.3f}")
-                
+
                 train_metrics = {}  # Reset
                 train_state.model.train()
-        
+
         # End of epoch evaluation
         eval_metrics = evaluate(train_state.model, eval_loader)
-        
+
         # Log to wandb
         wandb.log({
             "step": step,
@@ -237,9 +237,9 @@ def main(hydra_cfg: DictConfig) -> None:
             **{f"train/{k}": sum(v)/len(v) for k, v in train_metrics.items()},
             **{f"eval/{k}": v for k, v in eval_metrics.items()}
         })
-        
+
         print(f"🎯 Epoch {epoch+1} Complete - Eval Accuracy: {eval_metrics.get('accuracy', 0):.3f}")
-    
+
     print(f"✅ Training complete!")
     wandb.finish()
 
@@ -250,20 +250,20 @@ def evaluate(model: nn.Module, eval_loader: DataLoader) -> Dict[str, float]:
     total_loss = 0
     total_accuracy = 0
     total_batches = 0
-    
+
     with torch.no_grad():
         for batch in tqdm.tqdm(eval_loader, desc="Evaluating", leave=False):
             # Move to device
             batch = {k: v.cuda() if torch.cuda.is_available() else v for k, v in batch.items()}
-            
+
             # Forward pass
             carry, loss, metrics, outputs, halted = model(batch)
-            
+
             total_loss += loss.item()
             if 'accuracy' in metrics:
                 total_accuracy += metrics['accuracy'].item()
             total_batches += 1
-    
+
     return {
         "loss": total_loss / total_batches,
         "accuracy": total_accuracy / total_batches
