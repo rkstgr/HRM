@@ -16,7 +16,7 @@ import coolname
 import hydra
 import pydantic
 from omegaconf import DictConfig
-from adam_atan2_pytorch import AdamATan2
+from adam_atan2_pytorch import AdamAtan2
 
 from ai2arc_dataset import AI2ArcDatasetConfig, create_ai2arc_dataloader
 from utils.functions import load_model_class, get_model_source_path
@@ -146,7 +146,7 @@ def main(hydra_cfg: DictConfig) -> None:
     print(f"📊 Parameters: {trainable_params:,} trainable / {total_params:,} total")
 
     # Setup optimizer
-    optimizer = AdamATan2(
+    optimizer = AdamAtan2(
         loss_head.parameters(),
         lr=config.lr,
         betas=(config.beta1, config.beta2),
