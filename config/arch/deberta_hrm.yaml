@@ -1,0 +1,25 @@
+name: hrm.deberta_hrm@DebertaHRM
+loss:
+  name: losses@SimpleClassificationLoss
+
+# DebertaHRM specific config
+model_name: microsoft/deberta-v3-base
+hidden_size: 768
+num_labels: 4
+
+# HRM reasoning cycles
+H_cycles: 2
+L_cycles: 4
+
+# HRM layer depths
+H_layers: 2  
+L_layers: 2
+
+# Transformer config (matching DeBERTa)
+expansion: 4.0
+num_heads: 12
+
+rms_norm_eps: 1e-5
+rope_theta: 10000.0
+
+forward_dtype: bfloat16
