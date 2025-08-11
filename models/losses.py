@@ -99,3 +99,52 @@ class ACTLossHead(nn.Module):
         detached_outputs = {k: outputs[k].detach() for k in return_keys if k in outputs}
 
         return new_carry, lm_loss + 0.5 * (q_halt_loss + q_continue_loss), metrics, detached_outputs, new_carry.halted.all()
+
+
+class SimpleClassificationLoss(nn.Module):
+    """Simple classification loss for DebertaHRM"""
+    def __init__(self, model: nn.Module):
+        super().__init__()
+        self.model = model
+        
+    def forward(self, batch: Dict[str, torch.Tensor], return_keys: Sequence[str] = []) -> Tuple[Any, torch.Tensor, Dict[str, torch.Tensor], Dict[str, torch.Tensor], bool]:
+        # Forward pass
+        outputs = self.model(**batch)
+        
+        if isinstance(outputs, tuple) and len(outputs) == 2:
+            loss, logits = outputs
+        elif isinstance(outputs, tuple) and len(outputs) == 1:
+            logits = outputs[0]
+            # Compute loss if labels provided
+            if 'labels' in batch:
+                loss = F.cross_entropy(logits, batch['labels'])
+            else:
+                loss = torch.tensor(0.0, device=logits.device)
+        else:
+            logits = outputs
+            loss = torch.tensor(0.0, device=logits.device)
+            
+        # Metrics
+        metrics = {
+            "loss": loss.detach(),
+        }
+        
+        # Add accuracy if we have labels
+        if 'labels' in batch:
+            with torch.no_grad():
+                pred = torch.argmax(logits, dim=-1)
+                accuracy = (pred == batch['labels']).float().mean()
+                metrics["accuracy"] = accuracy
+        
+        # Outputs for return
+        detached_outputs = {
+            "logits": logits.detach(),
+        }
+        if 'labels' in batch:
+            detached_outputs["labels"] = batch['labels'].detach()
+            
+        # Filter outputs for return
+        detached_outputs = {k: detached_outputs[k] for k in return_keys if k in detached_outputs}
+        
+        # No carry state for simple classification, always "halted"
+        return None, loss, metrics, detached_outputs, True
